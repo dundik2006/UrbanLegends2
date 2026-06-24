@@ -42,9 +42,14 @@ mongoose.connect(mongoURI)
 // Настройка GridFS
 const conn = mongoose.connection;
 let gfs;
+
 conn.once('open', () => {
+  // Инициализация GridFS с правильным ObjectId
   gfs = Grid(conn.db, mongoose.mongo);
   gfs.collection('uploads');
+  
+  // ✅ ФИКС: добавляем ObjectId для использования в маршрутах
+  gfs.ObjectId = mongoose.Types.ObjectId;
   console.log('GridFS initialized');
 });
 
@@ -507,6 +512,16 @@ app.post('/api/upload-avatar', authenticateToken, upload.single('avatar'), async
       return res.status(500).json({ message: 'GridFS не инициализирован' });
     }
 
+app.post('/api/upload-avatar', authenticateToken, upload.single('avatar'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'Файл не загружен' });
+    }
+
+    if (!gfs) {
+      return res.status(500).json({ message: 'GridFS не инициализирован' });
+    }
+
     // Сохраняем файл в GridFS
     const writestream = gfs.createWriteStream({
       filename: req.file.originalname,
@@ -517,9 +532,16 @@ app.post('/api/upload-avatar', authenticateToken, upload.single('avatar'), async
     writestream.write(req.file.buffer);
     writestream.end();
 
+    // ✅ ФИКС: обёртка в Promise с правильной обработкой
     const fileId = await new Promise((resolve, reject) => {
-      writestream.on('finish', () => resolve(writestream.id));
-      writestream.on('error', reject);
+      writestream.on('finish', () => {
+        console.log('✅ Аватар сохранён, ID:', writestream.id);
+        resolve(writestream.id);
+      });
+      writestream.on('error', (err) => {
+        console.error('❌ Ошибка при сохранении аватара:', err);
+        reject(err);
+      });
     });
 
     const user = await User.findById(req.user.id);
@@ -543,7 +565,8 @@ app.get('/api/file/:id', async (req, res) => {
       return res.status(500).json({ message: 'GridFS не инициализирован' });
     }
 
-    const fileId = new mongoose.Types.ObjectId(req.params.id);
+    // ✅ ФИКС: используем gfs.ObjectId вместо mongoose.Types.ObjectId
+    const fileId = new gfs.ObjectId(req.params.id);
     
     const file = await gfs.files.findOne({ _id: fileId });
     if (!file) {
