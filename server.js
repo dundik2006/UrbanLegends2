@@ -501,75 +501,70 @@ app.put('/api/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// ========== ЗАГРУЗКА АВАТАРА (В GRIDFS) ==========
 app.post('/api/upload-avatar', authenticateToken, upload.single('avatar'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ message: 'Файл не загружен' });
+    try {
+        if (!req.file) {
+            return res.status(400).json({ message: 'Файл не загружен' });
+        }
+
+        if (!gfs) {
+            return res.status(500).json({ message: 'GridFS не инициализирован' });
+        }
+
+        // ✅ ФИКС: создаём ObjectId вручную
+        const fileId = new mongoose.Types.ObjectId();
+
+        const writestream = gfs.createWriteStream({
+            _id: fileId,
+            filename: req.file.originalname,
+            content_type: req.file.mimetype,
+            metadata: { userId: req.user.id }
+        });
+
+        writestream.write(req.file.buffer);
+        writestream.end();
+
+        await new Promise((resolve, reject) => {
+            writestream.on('finish', resolve);
+            writestream.on('error', reject);
+        });
+
+        const user = await User.findById(req.user.id);
+        user.avatar = `/api/file/${fileId}`;
+        await user.save();
+
+        res.json({ 
+            message: 'Аватар успешно загружен', 
+            avatarUrl: user.avatar 
+        });
+    } catch (error) {
+        console.error('Ошибка при загрузке аватара:', error);
+        res.status(500).json({ message: 'Ошибка сервера', error: error.message });
     }
-
-    if (!gfs) {
-      return res.status(500).json({ message: 'GridFS не инициализирован' });
-    }
-
-    // Сохраняем файл в GridFS
-    const writestream = gfs.createWriteStream({
-      filename: req.file.originalname,
-      content_type: req.file.mimetype,
-      metadata: { userId: req.user.id }
-    });
-
-    writestream.write(req.file.buffer);
-    writestream.end();
-
-    // ✅ ФИКС: обёртка в Promise с правильной обработкой
-    const fileId = await new Promise((resolve, reject) => {
-      writestream.on('finish', () => {
-        console.log('✅ Аватар сохранён, ID:', writestream.id);
-        resolve(writestream.id);
-      });
-      writestream.on('error', (err) => {
-        console.error('❌ Ошибка при сохранении аватара:', err);
-        reject(err);
-      });
-    });
-
-    const user = await User.findById(req.user.id);
-    user.avatar = `/api/file/${fileId}`;
-    await user.save();
-
-    res.json({ 
-      message: 'Аватар успешно загружен', 
-      avatarUrl: user.avatar 
-    });
-  } catch (error) {
-    console.error('Ошибка при загрузке аватара:', error);
-    res.status(500).json({ message: 'Ошибка сервера', error: error.message });
-  }
 });
 
 // ========== ПОЛУЧЕНИЕ ФАЙЛОВ ИЗ GRIDFS ==========
 app.get('/api/file/:id', async (req, res) => {
-  try {
-    if (!gfs) {
-      return res.status(500).json({ message: 'GridFS не инициализирован' });
-    }
+    try {
+        if (!gfs) {
+            return res.status(500).json({ message: 'GridFS не инициализирован' });
+        }
 
-    // ✅ ФИКС: используем gfs.ObjectId вместо mongoose.Types.ObjectId
-    const fileId = new gfs.ObjectId(req.params.id);
-    
-    const file = await gfs.files.findOne({ _id: fileId });
-    if (!file) {
-      return res.status(404).json({ message: 'Файл не найден' });
-    }
+        // ✅ ФИКС: используем mongoose.Types.ObjectId
+        const fileId = new mongoose.Types.ObjectId(req.params.id);
+        
+        const file = await gfs.files.findOne({ _id: fileId });
+        if (!file) {
+            return res.status(404).json({ message: 'Файл не найден' });
+        }
 
-    const readstream = gfs.createReadStream({ _id: fileId });
-    res.set('Content-Type', file.contentType);
-    readstream.pipe(res);
-  } catch (error) {
-    console.error('Ошибка при получении файла:', error);
-    res.status(500).json({ message: 'Ошибка сервера' });
-  }
+        const readstream = gfs.createReadStream({ _id: fileId });
+        res.set('Content-Type', file.contentType);
+        readstream.pipe(res);
+    } catch (error) {
+        console.error('Ошибка при получении файла:', error);
+        res.status(500).json({ message: 'Ошибка сервера' });
+    }
 });
 
 // ========== РОУТЫ ДЛЯ ЛЕГЕНД ==========
@@ -688,7 +683,6 @@ app.get('/api/legends/:id', async (req, res) => {
   }
 });
 
-// ========== СОЗДАНИЕ ЛЕГЕНДЫ (С ХРАНЕНИЕМ ФОТО В GRIDFS) ==========
 app.post('/api/legends', authenticateToken, upload.array('images', 5), async (req, res) => {
     try {
         console.log('📥 Получен запрос на создание легенды');
@@ -723,7 +717,12 @@ app.post('/api/legends', authenticateToken, upload.array('images', 5), async (re
                 console.log(`📁 Обработка файла ${i + 1}: ${file.originalname}`);
 
                 try {
+                    // ✅ ФИКС: создаём ObjectId вручную
+                    const fileId = new mongoose.Types.ObjectId();
+                    
+                    // ✅ ФИКС: используем правильный синтаксис для writestream
                     const writestream = gfs.createWriteStream({
+                        _id: fileId, // ← передаём ID вручную
                         filename: file.originalname,
                         content_type: file.mimetype,
                         metadata: { userId: req.user.id }
@@ -732,8 +731,8 @@ app.post('/api/legends', authenticateToken, upload.array('images', 5), async (re
                     writestream.write(file.buffer);
                     writestream.end();
 
-                    const fileId = await new Promise((resolve, reject) => {
-                        writestream.on('finish', () => resolve(writestream.id));
+                    await new Promise((resolve, reject) => {
+                        writestream.on('finish', resolve);
                         writestream.on('error', reject);
                     });
 
@@ -741,7 +740,6 @@ app.post('/api/legends', authenticateToken, upload.array('images', 5), async (re
                     console.log(`✅ Файл сохранён, ID: ${fileId}`);
                 } catch (fileError) {
                     console.error(`❌ Ошибка при сохранении файла ${i + 1}:`, fileError);
-                    // Продолжаем с другими файлами
                 }
             }
         }
