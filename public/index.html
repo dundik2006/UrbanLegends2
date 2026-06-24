@@ -4430,51 +4430,34 @@ function setupFullTextToggle() {
         }
 
         // Заглушки для функций, которые требуют бэкенд
-        async function addLegend(legendData) {
-            try {
-                const token = localStorage.getItem('token');
-                const response = await fetch('/api/legends', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${token}`
-                    },
-                    body: JSON.stringify(legendData)
-                });
-                
-                const data = await response.json();
-                
-                if (response.ok) {
-                    showNotification('Легенда успешно отправлена на модерацию!');
-                    closeModal('addLegendModal');
-                    loadLegends();
-                } else {
-                    alert(data.message);
-                }
-            } catch (error) {
-                console.error('Ошибка при добавлении легенды:', error);
-                // Демо-режим
-                const legendData = {
-    title,
-    description,
-    fullText: document.getElementById('fullText').value.trim(),
-    category,
-    image
-};
-                const newLegend = {
-                    _id: Date.now().toString(),
-                    ...legendData,
-                    rating: 0,
-                    likes: [],
-                    comments: [],
-                    status: 'pending',
-                    createdBy: currentUser.username
-                };
-                legends.push(newLegend);
-                showNotification('Легенда успешно отправлена на модерацию! (демо-режим)');
-                closeModal('addLegendModal');
-            }
+async function addLegend(formData) {
+    try {
+        const token = localStorage.getItem('token');
+        const response = await fetch('/api/legends', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${token}`
+                // ❌ НЕ ДОБАВЛЯЙ 'Content-Type' здесь!
+            },
+            body: formData // ← передаём FormData напрямую
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            showNotification('Легенда успешно отправлена на модерацию!');
+            closeModal('addLegendModal');
+            clearLegendImages();
+            document.getElementById('modalLegendForm').reset();
+            loadLegends();
+        } else {
+            alert(data.message || 'Ошибка при создании легенды');
         }
+    } catch (error) {
+        console.error('Ошибка при добавлении легенды:', error);
+        showNotification('Ошибка при добавлении легенды', 'error');
+    }
+}
 
         async function loadPendingLegends() {
             try {
