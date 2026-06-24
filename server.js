@@ -677,76 +677,119 @@ app.get('/api/legends/:id', async (req, res) => {
 
 // ========== СОЗДАНИЕ ЛЕГЕНДЫ (С ХРАНЕНИЕМ ФОТО В GRIDFS) ==========
 app.post('/api/legends', authenticateToken, upload.array('images', 5), async (req, res) => {
-  try {
-    const { title, description, fullText, category, lat, lng, address, tags } = req.body;
-    
-    const imageUrls = [];
-    
-    if (req.files && req.files.length > 0) {
-      if (!gfs) {
-        return res.status(500).json({ message: 'GridFS не инициализирован' });
-      }
+    try {
+        console.log('📥 Получен запрос на создание легенды');
+        console.log('📦 Тело запроса:', req.body);
+        console.log('🖼️ Количество файлов:', req.files ? req.files.length : 0);
 
-      for (const file of req.files) {
-        const writestream = gfs.createWriteStream({
-          filename: file.originalname,
-          content_type: file.mimetype,
-          metadata: { userId: req.user.id }
+        const { title, description, fullText, category, lat, lng, address, tags } = req.body;
+
+        // Проверяем обязательные поля
+        if (!title || !description || !category || !lat || !lng) {
+            console.log('❌ Обязательные поля отсутствуют');
+            return res.status(400).json({
+                message: 'Все обязательные поля должны быть заполнены'
+            });
+        }
+
+        const imageUrls = [];
+
+        // Обработка файлов
+        if (req.files && req.files.length > 0) {
+            console.log('🔄 Начинаем обработку файлов...');
+
+            if (!gfs) {
+                console.error('❌ GridFS не инициализирован!');
+                return res.status(503).json({
+                    message: 'Сервер загружается. Попробуйте через минуту.'
+                });
+            }
+
+            for (let i = 0; i < req.files.length; i++) {
+                const file = req.files[i];
+                console.log(`📁 Обработка файла ${i + 1}: ${file.originalname}`);
+
+                try {
+                    const writestream = gfs.createWriteStream({
+                        filename: file.originalname,
+                        content_type: file.mimetype,
+                        metadata: { userId: req.user.id }
+                    });
+
+                    writestream.write(file.buffer);
+                    writestream.end();
+
+                    const fileId = await new Promise((resolve, reject) => {
+                        writestream.on('finish', () => resolve(writestream.id));
+                        writestream.on('error', reject);
+                    });
+
+                    imageUrls.push(`/api/file/${fileId}`);
+                    console.log(`✅ Файл сохранён, ID: ${fileId}`);
+                } catch (fileError) {
+                    console.error(`❌ Ошибка при сохранении файла ${i + 1}:`, fileError);
+                    // Продолжаем с другими файлами
+                }
+            }
+        }
+
+        const tagArray = tags ? tags.split(',').map(tag => tag.trim()) : [];
+
+        console.log('📝 Создаём легенду в БД...');
+
+        const legend = new Legend({
+            title,
+            description,
+            fullText,
+            category,
+            images: imageUrls,
+            location: { lat: parseFloat(lat), lng: parseFloat(lng), address },
+            tags: tagArray,
+            createdBy: req.user.id
         });
 
-        writestream.write(file.buffer);
-        writestream.end();
+        await legend.save();
+        console.log(`✅ Легенда создана с ID: ${legend._id}`);
 
-        const fileId = await new Promise((resolve, reject) => {
-          writestream.on('finish', () => resolve(writestream.id));
-          writestream.on('error', reject);
+        // Обновляем категорию
+        await Category.findOneAndUpdate(
+            { name: category },
+            { $inc: { legendCount: 1 } },
+            { upsert: true }
+        );
+
+        // Проверяем достижения
+        const userLegendsCount = await Legend.countDocuments({
+            createdBy: req.user.id,
+            status: 'approved'
+        });
+        await checkAndAwardAchievements(req.user.id, 'legend', userLegendsCount);
+
+        // Записываем активность
+        await Activity.create({
+            user: req.user.id,
+            type: 'legend_created',
+            data: {
+                legendId: legend._id,
+                legendTitle: legend.title
+            }
         });
 
-        imageUrls.push(`/api/file/${fileId}`);
-      }
+        console.log('🎉 Легенда успешно создана!');
+
+        res.status(201).json({
+            message: 'Легенда успешно создана и отправлена на модерацию',
+            legend
+        });
+    } catch (error) {
+        console.error('❌ КРИТИЧЕСКАЯ ОШИБКА при создании легенды:', error);
+        console.error('📋 Стек ошибки:', error.stack);
+        res.status(500).json({
+            message: 'Ошибка сервера',
+            error: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
     }
-    
-    const tagArray = tags ? tags.split(',').map(tag => tag.trim()) : [];
-    
-    const legend = new Legend({
-      title,
-      description,
-      fullText,
-      category,
-      images: imageUrls,
-      location: { lat: parseFloat(lat), lng: parseFloat(lng), address },
-      tags: tagArray,
-      createdBy: req.user.id
-    });
-    
-    await legend.save();
-    
-    await Category.findOneAndUpdate(
-      { name: category },
-      { $inc: { legendCount: 1 } },
-      { upsert: true }
-    );
-    
-    const userLegendsCount = await Legend.countDocuments({ createdBy: req.user.id, status: 'approved' });
-    await checkAndAwardAchievements(req.user.id, 'legend', userLegendsCount);
-    
-    await Activity.create({
-      user: req.user.id,
-      type: 'legend_created',
-      data: {
-        legendId: legend._id,
-        legendTitle: legend.title
-      }
-    });
-    
-    res.status(201).json({
-      message: 'Легенда успешно создана и отправлена на модерацию',
-      legend
-    });
-  } catch (error) {
-    console.error('Ошибка при создании легенды:', error);
-    res.status(500).json({ message: 'Ошибка сервера', error: error.message });
-  }
 });
 
 // ========== ЛАЙКИ, РЕЙТИНГИ, КОММЕНТАРИИ ==========
