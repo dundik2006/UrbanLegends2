@@ -1499,3 +1499,5 @@ mongoose.connect(process.env.MONGODB_URI)
   .catch(err => {
     console.error('Ошибка при запуске сервера:', err);
   });
+
+// ✅ ЭТА СКОБКА ЗАКРЫВАЕТ ВЕСЬ ФАЙЛ
