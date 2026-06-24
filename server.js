@@ -512,16 +512,6 @@ app.post('/api/upload-avatar', authenticateToken, upload.single('avatar'), async
       return res.status(500).json({ message: 'GridFS не инициализирован' });
     }
 
-app.post('/api/upload-avatar', authenticateToken, upload.single('avatar'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ message: 'Файл не загружен' });
-    }
-
-    if (!gfs) {
-      return res.status(500).json({ message: 'GridFS не инициализирован' });
-    }
-
     // Сохраняем файл в GridFS
     const writestream = gfs.createWriteStream({
       filename: req.file.originalname,
