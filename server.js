@@ -8,7 +8,7 @@ const multer = require('multer');
 const sharp = require('sharp');
 const nodemailer = require('nodemailer');
 const { getDistance } = require('geolib');
-const Grid = require('gridfs-stream');
+const { GridFsStorage } = require('multer-gridfs-storage');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -39,32 +39,47 @@ mongoose.connect(mongoURI)
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.error('MongoDB connection error:', err));
 
-// Настройка GridFS
+// Настройка GridFS с использованием multer-gridfs-storage
 const conn = mongoose.connection;
-let gfs;
+let gfsBucket;
 
+// Создаём bucket для хранения файлов
 conn.once('open', () => {
-  // Инициализация GridFS с правильным ObjectId
-  gfs = Grid(conn.db, mongoose.mongo);
-  gfs.collection('uploads');
-  
-  // ✅ ФИКС: добавляем ObjectId для использования в маршрутах
-  gfs.ObjectId = mongoose.Types.ObjectId;
-  console.log('GridFS initialized');
+    gfsBucket = new mongoose.mongo.GridFSBucket(conn.db, {
+        bucketName: 'uploads'
+    });
+    console.log('GridFS Bucket initialized');
 });
 
-// Настройка multer для загрузки файлов (в память)
-const storage = multer.memoryStorage();
-const upload = multer({
-  storage: storage,
-  limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Только изображения разрешены!'), false);
+// Настройка multer для загрузки файлов в GridFS
+const storage = new GridFsStorage({
+    db: conn,
+    file: (req, file) => {
+        return new Promise((resolve, reject) => {
+            const filename = file.originalname;
+            const fileInfo = {
+                filename: filename,
+                bucketName: 'uploads',
+                metadata: {
+                    userId: req.user ? req.user.id : 'anonymous',
+                    uploadDate: new Date()
+                }
+            };
+            resolve(fileInfo);
+        });
     }
-  }
+});
+
+const upload = multer({
+    storage: storage,
+    limits: { fileSize: 5 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype.startsWith('image/')) {
+            cb(null, true);
+        } else {
+            cb(new Error('Только изображения разрешены!'), false);
+        }
+    }
 });
 
 // Схемы Mongoose
@@ -507,35 +522,20 @@ app.post('/api/upload-avatar', authenticateToken, upload.single('avatar'), async
             return res.status(400).json({ message: 'Файл не загружен' });
         }
 
-        if (!gfs) {
-            return res.status(500).json({ message: 'GridFS не инициализирован' });
+        if (!gfsBucket) {
+            return res.status(500).json({ message: 'GridFS Bucket не инициализирован' });
         }
 
-        // ✅ ФИКС: создаём ObjectId вручную
-        const fileId = new mongoose.Types.ObjectId();
-
-        const writestream = gfs.createWriteStream({
-            _id: fileId,
-            filename: req.file.originalname,
-            content_type: req.file.mimetype,
-            metadata: { userId: req.user.id }
-        });
-
-        writestream.write(req.file.buffer);
-        writestream.end();
-
-        await new Promise((resolve, reject) => {
-            writestream.on('finish', resolve);
-            writestream.on('error', reject);
-        });
+        // ✅ multer-gridfs-storage уже сохранил файл
+        const fileId = req.file.id;
 
         const user = await User.findById(req.user.id);
         user.avatar = `/api/file/${fileId}`;
         await user.save();
 
-        res.json({ 
-            message: 'Аватар успешно загружен', 
-            avatarUrl: user.avatar 
+        res.json({
+            message: 'Аватар успешно загружен',
+            avatarUrl: user.avatar
         });
     } catch (error) {
         console.error('Ошибка при загрузке аватара:', error);
@@ -543,23 +543,27 @@ app.post('/api/upload-avatar', authenticateToken, upload.single('avatar'), async
     }
 });
 
-// ========== ПОЛУЧЕНИЕ ФАЙЛОВ ИЗ GRIDFS ==========
 app.get('/api/file/:id', async (req, res) => {
     try {
-        if (!gfs) {
-            return res.status(500).json({ message: 'GridFS не инициализирован' });
+        if (!gfsBucket) {
+            return res.status(500).json({ message: 'GridFS Bucket не инициализирован' });
         }
 
-        // ✅ ФИКС: используем mongoose.Types.ObjectId
         const fileId = new mongoose.Types.ObjectId(req.params.id);
-        
-        const file = await gfs.files.findOne({ _id: fileId });
-        if (!file) {
+
+        // Проверяем, существует ли файл
+        const files = await gfsBucket.find({ _id: fileId }).toArray();
+        if (!files || files.length === 0) {
             return res.status(404).json({ message: 'Файл не найден' });
         }
 
-        const readstream = gfs.createReadStream({ _id: fileId });
+        const file = files[0];
+
+        // Устанавливаем правильный Content-Type
         res.set('Content-Type', file.contentType);
+
+        // Создаём поток для чтения файла
+        const readstream = gfsBucket.openDownloadStream(fileId);
         readstream.pipe(res);
     } catch (error) {
         console.error('Ошибка при получении файла:', error);
@@ -691,7 +695,6 @@ app.post('/api/legends', authenticateToken, upload.array('images', 5), async (re
 
         const { title, description, fullText, category, lat, lng, address, tags } = req.body;
 
-        // Проверяем обязательные поля
         if (!title || !description || !category || !lat || !lng) {
             console.log('❌ Обязательные поля отсутствуют');
             return res.status(400).json({
@@ -701,12 +704,11 @@ app.post('/api/legends', authenticateToken, upload.array('images', 5), async (re
 
         const imageUrls = [];
 
-        // Обработка файлов
         if (req.files && req.files.length > 0) {
             console.log('🔄 Начинаем обработку файлов...');
 
-            if (!gfs) {
-                console.error('❌ GridFS не инициализирован!');
+            if (!gfsBucket) {
+                console.error('❌ GridFS Bucket не инициализирован!');
                 return res.status(503).json({
                     message: 'Сервер загружается. Попробуйте через минуту.'
                 });
@@ -716,31 +718,10 @@ app.post('/api/legends', authenticateToken, upload.array('images', 5), async (re
                 const file = req.files[i];
                 console.log(`📁 Обработка файла ${i + 1}: ${file.originalname}`);
 
-                try {
-                    // ✅ ФИКС: создаём ObjectId вручную
-                    const fileId = new mongoose.Types.ObjectId();
-                    
-                    // ✅ ФИКС: используем правильный синтаксис для writestream
-                    const writestream = gfs.createWriteStream({
-                        _id: fileId, // ← передаём ID вручную
-                        filename: file.originalname,
-                        content_type: file.mimetype,
-                        metadata: { userId: req.user.id }
-                    });
-
-                    writestream.write(file.buffer);
-                    writestream.end();
-
-                    await new Promise((resolve, reject) => {
-                        writestream.on('finish', resolve);
-                        writestream.on('error', reject);
-                    });
-
-                    imageUrls.push(`/api/file/${fileId}`);
-                    console.log(`✅ Файл сохранён, ID: ${fileId}`);
-                } catch (fileError) {
-                    console.error(`❌ Ошибка при сохранении файла ${i + 1}:`, fileError);
-                }
+                // ✅ multer-gridfs-storage автоматически сохраняет файл
+                const fileId = file.id;
+                imageUrls.push(`/api/file/${fileId}`);
+                console.log(`✅ Файл сохранён, ID: ${fileId}`);
             }
         }
 
@@ -762,21 +743,18 @@ app.post('/api/legends', authenticateToken, upload.array('images', 5), async (re
         await legend.save();
         console.log(`✅ Легенда создана с ID: ${legend._id}`);
 
-        // Обновляем категорию
         await Category.findOneAndUpdate(
             { name: category },
             { $inc: { legendCount: 1 } },
             { upsert: true }
         );
 
-        // Проверяем достижения
         const userLegendsCount = await Legend.countDocuments({
             createdBy: req.user.id,
             status: 'approved'
         });
         await checkAndAwardAchievements(req.user.id, 'legend', userLegendsCount);
 
-        // Записываем активность
         await Activity.create({
             user: req.user.id,
             type: 'legend_created',
